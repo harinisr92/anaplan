@@ -1,0 +1,36 @@
+-- =============================================================================
+-- FUNCTION: anaplan_dev.split_clob()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.SPLIT_CLOB
+-- Oracle : PIPELINED function returning VCARRAY
+--          DBMS_LOB.getlength / DBMS_LOB.SUBSTR for CLOB handling
+--          Manual chunk-boundary detection (c_chunk_limit=32000, c_line_limit=4000)
+--          to work around Oracle VARCHAR2(32767) limit on DBMS_LOB.SUBSTR
+--          PIPE ROW(...) to stream results
+--          EXCEPTION WHEN no_data_needed THEN NULL
+-- PG     : Set-returning function (RETURNS TABLE) replaces PIPELINED
+--          TEXT type has no size limit so no chunking is needed at all
+--          regexp_split_to_table replaces the manual delimiter-scanning loop
+--          CLOB type does not exist in PG - TEXT is equivalent
+-- Behaviour: unchanged — splits a large text value into rows by delimiter.
+--            The chunking logic (all variables c_chunk_limit, c_line_limit,
+--            v_chunk_end etc.) is entirely removed because PostgreSQL TEXT
+--            handles arbitrarily large values natively without chunking.
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION anaplan_dev.split_clob(
+    -- Oracle: p_clob IN CLOB, p_delimiter IN VARCHAR2 DEFAULT CHR(10)
+    p_clob       TEXT,
+    p_delimiter  VARCHAR DEFAULT E'\n'
+)
+RETURNS TABLE (line TEXT)
+LANGUAGE sql
+STABLE
+AS $$
+    -- Oracle: entire WHILE loop with chunk management + PIPE ROW calls
+    -- PG    : single built-in function handles all cases
+    SELECT regexp_split_to_table(p_clob, p_delimiter);
+$$;
+
+COMMENT ON FUNCTION anaplan_dev.split_clob(TEXT, VARCHAR) IS
+    'Splits large text into rows by delimiter. Migrated from Oracle SPLIT_CLOB - PIPELINED+DBMS_LOB chunking logic entirely replaced by regexp_split_to_table since PG TEXT has no 32KB limit. Function name and signature preserved for call-site compatibility.';

@@ -1,0 +1,73 @@
+-- =============================================================================
+-- PROCEDURE: anaplan_dev.get_metadata()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.GET_METADATA
+-- Oracle : UTL_HTTP.begin_request GET + utl_http.get_header_count loop
+--          utl_http.read_text loop to print response body
+--          DBMS_OUTPUT.PUT_LINE for logging
+-- PG     : http_get() from pg_http extension
+--          RAISE NOTICE replaces DBMS_OUTPUT.PUT_LINE
+--          Response headers accessed via v_response.headers array
+-- Behaviour: unchanged — GETs Anaplan metadata for a workspace/model/type,
+--            prints response headers and body
+-- =============================================================================
+
+CREATE OR REPLACE PROCEDURE anaplan_dev.get_metadata(
+    -- Oracle: workspace_ varchar, model_ varchar, type_ varchar DEFAULT 'processes'
+    workspace_  VARCHAR,
+    model_      VARCHAR,
+    type_       VARCHAR DEFAULT 'processes'
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    -- Oracle: req utl_http.req; resp utl_http.resp;
+    --         l_response_header_name varchar2(256);
+    --         l_response_header_value varchar2(1024);
+    --         l_request_body clob; v_resp_chunked varchar2(32767);
+    --         l_content_length NUMBER(8); url_ varchar(3000);
+    v_url      VARCHAR;
+    v_response http_response;
+    v_header   http_header;
+BEGIN
+    v_url := 'https://10.10.100.200/anaplan/2/0/workspaces/' || workspace_
+             || '/models/' || model_ || '/' || type_;
+
+    -- Oracle: dbms_output.put_line('URL='||url_);
+    RAISE NOTICE 'URL=%', v_url;
+
+    -- Oracle: UTL_HTTP.set_wallet(...); req := UTL_HTTP.begin_request(url=>..., method=>'GET');
+    --         utl_http.set_header(req,'Content-Type','application/json');
+    --         resp := UTL_HTTP.get_response(req);
+    SELECT * INTO v_response FROM http_get(v_url);
+
+    -- Oracle: for i in 1..utl_http.get_header_count(resp) loop
+    --           utl_http.get_header(resp,i,l_response_header_name,l_response_header_value);
+    --           dbms_output.put_line('Response Header> '||name||': '||value);
+    --         end loop;
+    FOREACH v_header IN ARRAY v_response.headers LOOP
+        RAISE NOTICE 'Response Header> %: %', v_header.field, v_header.value;
+    END LOOP;
+
+    -- Oracle: loop utl_http.read_text(resp, v_resp_chunked, 32767);
+    --               dbms_output.put_line(v_resp_chunked); end loop;
+    -- PG    : full body already in v_response.content
+    RAISE NOTICE '%', v_response.content;
+
+    -- Oracle: IF resp.status_code = utl_http.HTTP_OK AND resp.reason_phrase='OK'
+    IF v_response.status = 200 THEN
+        RAISE NOTICE 'Webservice without errors';
+    ELSE
+        RAISE NOTICE 'Webservice errors=%-%', v_response.status, v_response.content;
+    END IF;
+
+EXCEPTION
+    -- Oracle: WHEN OTHERS THEN dbms_output.put_line('ERROR Others='||SQLERRM);
+    --                          utl_http.end_response(resp);
+    WHEN OTHERS THEN
+        RAISE NOTICE 'ERROR Others=%', SQLERRM;
+END;
+$$;
+
+COMMENT ON PROCEDURE anaplan_dev.get_metadata(VARCHAR, VARCHAR, VARCHAR) IS
+    'GETs Anaplan metadata for a workspace/model/type and prints headers + body. Migrated from Oracle GET_METADATA - UTL_HTTP replaced with http_get, DBMS_OUTPUT replaced with RAISE NOTICE.';

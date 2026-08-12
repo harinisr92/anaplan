@@ -1,0 +1,52 @@
+-- =============================================================================
+-- FUNCTION: anaplan_dev.authenticate()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.AUTHENTICATE
+-- Oracle : UTL_HTTP.begin_request / get_response / read_text
+--          UTL_RAW.cast_to_varchar2 / UTL_ENCODE.base64_encode
+--          UTL_HTTP.set_wallet (SSL wallet path)
+-- PG     : http extension (CREATE EXTENSION IF NOT EXISTS http)
+--          encode(...,'base64') for base64
+--          SSL handled at libpq / pg_hba level, not per-request wallet
+-- Behaviour: unchanged — POSTs to Anaplan auth URL, returns raw response body
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION anaplan_dev.authenticate()
+RETURNS VARCHAR
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_url        VARCHAR := 'https://auth.anaplan.com/token/authenticate';
+    v_user       VARCHAR := 'jukka.tanskanen@olvi.fi';
+    v_pass       VARCHAR := 'ghvgvhghvgvhghvghvvgh';
+    v_userba     VARCHAR;
+    v_response   http_response;
+BEGIN
+    -- Oracle: UTL_RAW.cast_to_varchar2(UTL_ENCODE.base64_encode(...))
+    -- PG    : encode(convert_to(...),'base64')
+    v_userba := encode(convert_to(v_user || ':' || v_pass, 'UTF8'), 'base64');
+
+    -- Oracle: UTL_HTTP.set_wallet(...) -- SSL wallet config
+    -- PG    : SSL configured at connection/libpq level, no per-call wallet
+
+    -- Oracle: UTL_HTTP.begin_request + get_response + read_text
+    -- PG    : http() from pg_http extension
+    SELECT * INTO v_response
+    FROM http((
+        'POST',
+        v_url,
+        ARRAY[http_header('Authorization', 'Basic ' || v_userba)],
+        'application/json',
+        NULL
+    )::http_request);
+
+    -- Oracle: DBMS_OUTPUT.PUT_LINE / commented-out lines retained as comments
+    -- dbms_output.put_line(  );
+    -- RETURN userBA;
+
+    RETURN v_response.content;
+END;
+$$;
+
+COMMENT ON FUNCTION anaplan_dev.authenticate() IS
+    'Authenticates against Anaplan API. Migrated from Oracle AUTHENTICATE - UTL_HTTP replaced with pg_http extension. Returns raw token response body.';

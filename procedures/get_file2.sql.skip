@@ -1,0 +1,68 @@
+-- =============================================================================
+-- PROCEDURE: anaplan_dev.get_file2()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.GET_FILE2
+-- Same conversion pattern as GET_file. Differences vs GET_file:
+--   - workspace_ is a parameter (not hardcoded)
+--   - DBMS_LOCK.SLEEP(30) instead of SLEEP(125)
+-- Oracle conversions same as get_file.sql
+-- =============================================================================
+
+CREATE OR REPLACE PROCEDURE anaplan_dev.get_file2(
+    -- Oracle: workspace_ varchar, model_ varchar, file_ varchar, proc_ varchar
+    workspace_  VARCHAR,
+    model_      VARCHAR,
+    file_       VARCHAR,
+    proc_       VARCHAR
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_base_url  VARCHAR := 'https://10.10.100.200/anaplan/2/0';
+    v_response  http_response;
+    v_resp      TEXT;
+    v_header    http_header;
+BEGIN
+    -- Oracle: nested PROCEDURE SEND() -> UTL_HTTP POST /processes/.../tasks
+    RAISE NOTICE '%', v_base_url || '/workspaces/' || workspace_ || '/models/' || model_ || '/processes/' || proc_ || '/tasks';
+
+    SELECT * INTO v_response
+    FROM http_post(
+        v_base_url || '/workspaces/' || workspace_ || '/models/' || model_ || '/processes/' || proc_ || '/tasks',
+        '{"localeName":"en_US"}',
+        'application/json'
+    );
+
+    -- Oracle: DBMS_LOCK.SLEEP(30); -- change the parameter to 125
+    PERFORM pg_sleep(30);
+
+    RAISE NOTICE '%', v_base_url || '/workspaces/' || workspace_ || '/models/' || model_ || '/files/' || file_;
+
+    SELECT * INTO v_response
+    FROM http_get(
+        v_base_url || '/workspaces/' || workspace_ || '/models/' || model_ || '/files/' || file_
+    );
+
+    FOREACH v_header IN ARRAY v_response.headers LOOP
+        RAISE NOTICE 'Response Header> %: %', v_header.field, v_header.value;
+    END LOOP;
+
+    v_resp := v_response.content;
+
+    -- Oracle: anaplan.PRO_WRITE_CLOB_TO_FILE('CSV_DIR', file_||'.csv', v_resp);
+    CALL anaplan_dev.pro_write_clob_to_file('CSV_DIR', file_ || '.csv', v_resp);
+
+    IF v_response.status = 200 THEN
+        RAISE NOTICE 'Webservice without errors';
+    ELSE
+        RAISE NOTICE 'Webservice errors=%', v_response.status;
+    END IF;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE NOTICE 'ERROR Others=%', SQLERRM;
+END;
+$$;
+
+COMMENT ON PROCEDURE anaplan_dev.get_file2(VARCHAR, VARCHAR, VARCHAR, VARCHAR) IS
+    'Triggers Anaplan export, waits 30s, downloads and writes file. Same as get_file but workspace_ is a parameter. Migrated from Oracle GET_FILE2.';

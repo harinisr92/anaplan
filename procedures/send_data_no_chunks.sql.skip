@@ -1,0 +1,245 @@
+-- =============================================================================
+-- PROCEDURE: anaplan_dev.send_data_no_chunks()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.SEND_DATA_NO_CHUNKS
+-- Oracle conversions applied:
+--   TYPE curtype IS REF CURSOR / OPEN / FETCH loop
+--     -> FOR EXECUTE loop in PL/pgSQL
+--   CLOB v_clob + DBMS_LOB.append
+--     -> TEXT accumulation (PG TEXT has no 32KB limit, no chunking needed)
+--   Nested PROCEDURE SEND(DATA, METHOD, iTYPE, urlSuffix, counter)
+--     -> Inlined as separate http calls + polling WHILE loop
+--     -> Recursion (self-call for polling) -> bounded WHILE loop (same max counter=20)
+--   UTL_HTTP.begin_request/write_text/get_response/read_text/end_response
+--     -> http() / http_put() / http_post() / http_get() from pg_http extension
+--   DBMS_LOB.read (chunk loop for > 32KB content)
+--     -> not needed: single http() call handles any size
+--   convert(data,'UTF8','WE8ISO8859P1')
+--     -> not needed: PG is UTF-8 throughout
+--   JSON_TABLE(l_response_body,'$' COLUMNS(taskid varchar2 path '$.task.taskId'))
+--     -> response.content::JSON -> 'task' ->> 'taskId'
+--   JSON_TABLE ... $.task.currentStep
+--     -> response.content::JSON -> 'task' ->> 'currentStep'
+--   DBMS_LOCK.sleep(default_sleep_time)
+--     -> pg_sleep(default_sleep_time)
+--   ve.send_mail(...)
+--     -> CALL ve.send_mail(...) — cross-schema call preserved as-is
+--        (ve schema must be migrated separately)
+--   DBMS_OUTPUT.PUT_LINE
+--     -> RAISE NOTICE
+--   IF INMSGN = 'TD_SALES_SUM' or INMSGN = 'TD_SALES_SUM@LBM3PRD1_ANAPLAN'
+--     -> preserved exactly (both string values retained)
+--   all FILID/PROID assignments preserved exactly from Oracle source
+--   default_sleep_time per-INMSGN overrides preserved exactly
+-- Behaviour: unchanged — uploads full payload as single PUT, triggers process,
+--            polls task status up to 20 times, sends email on failure
+-- =============================================================================
+
+CREATE OR REPLACE PROCEDURE anaplan_dev.send_data_no_chunks(
+    -- Oracle: INMSGN VARCHAR2, DIVI VARCHAR2 DEFAULT '0', MONT NUMBER DEFAULT 0, DEBUG_ INT DEFAULT 0
+    inmsgn  VARCHAR,
+    divi    VARCHAR DEFAULT '0',
+    mont    INT     DEFAULT 0,
+    debug_  INT     DEFAULT 0
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    filid              VARCHAR(200);
+    proid              VARCHAR(200);
+    -- Oracle: v_clob CLOB; -> PG TEXT (no 32KB limit, no DBMS_LOB needed)
+    v_clob             TEXT := '';
+    -- Oracle: TYPE curtype IS REF CURSOR; l_cursor curtype; f_fileline VARCHAR2(32767);
+    v_row              RECORD;
+    l_sql              VARCHAR;
+    f_fileline         TEXT;
+    taskid             VARCHAR(200);
+    taskstatus         VARCHAR(2000);
+    default_sleep_time INT := 5;
+    v_response         http_response;
+    l_response_body    TEXT;
+    counter            INT := 0;
+    v_base_url         VARCHAR := 'https://10.10.100.200/anaplan/2/0/workspaces/8a868cd97dc4162b017e59e7ad353677/models/197C1C80439046AD8BAE11CFF86C0552';
+BEGIN
+    filid := '1';
+    proid := '1';
+
+    -- ── FILID/PROID mapping (preserved exactly from Oracle source) ─────────
+    IF inmsgn = 'MD_PRODUCT'               THEN filid := '113000000194'; proid := '118000000001';                             END IF;
+    IF inmsgn = 'MD_CUSTOMER'              THEN filid := '113000000195'; proid := '118000000002';                             END IF;
+    IF inmsgn = 'MD_ACCOUNT'              THEN filid := '113000000210'; proid := '118000000004';                             END IF;
+    IF inmsgn = 'MD_COSTCENTER'            THEN filid := '113000000150'; proid := '118000000003';                             END IF;
+    IF inmsgn = 'MD_WORKCENTER'            THEN filid := '113000000140'; proid := '118000000016';                             END IF;
+    IF inmsgn = 'MD_PRICELIST'             THEN filid := '113000000106'; proid := '118000000013';                             END IF;
+    IF inmsgn = 'MD_COGS_MATERIALS'        THEN filid := '113000000125'; proid := '118000000010';                             END IF;
+    IF inmsgn = 'TD_GL_SUM'                THEN filid := '113000000087'; proid := '118000000008'; default_sleep_time := 20;   END IF;
+    -- Oracle: IF INMSGN = 'TD_SALES_SUM' or INMSGN = 'TD_SALES_SUM@LBM3PRD1_ANAPLAN'
+    IF inmsgn IN ('TD_SALES_SUM','TD_SALES_SUM@LBM3PRD1_ANAPLAN')
+                                           THEN filid := '113000000153'; proid := '118000000006'; default_sleep_time := 20;   END IF;
+    IF inmsgn = 'AD_LAST_PURCH_PRICE'      THEN filid := '113000000121'; proid := '118000000021';                             END IF;
+    IF inmsgn = 'TD_MARKETINGMONEY'        THEN filid := '113000000168'; proid := '118000000020';                             END IF;
+    IF inmsgn = 'AD_MARKET_DATA'           THEN filid := '113000000165'; proid := '118000000014'; default_sleep_time := 20;   END IF;
+    IF inmsgn = 'TD_DEPRECIATION_PLAN'     THEN filid := '113000000158'; proid := '118000000012';                             END IF;
+    IF inmsgn = 'TD_COGS_RECIPE'           THEN filid := '113000000096'; proid := '118000000011';                             END IF;
+    IF inmsgn = 'TD_DELIVERY'              THEN filid := '113000000089'; proid := '118000000007';                             END IF;
+    IF inmsgn = 'TD_SALES_SUM_DAILY'       THEN filid := '113000000093'; proid := '118000000009'; default_sleep_time := 15;   END IF;
+    IF inmsgn = 'AD_CURRENCYRATES'         THEN filid := '113000000155'; proid := '118000000022';                             END IF;
+    IF inmsgn = 'TD_COGS_OH_COSTING'       THEN filid := '113000000199'; proid := '118000000027';                             END IF;
+    IF inmsgn = 'TD_CAMPAIGNS'             THEN filid := '113000000207'; proid := '118000000035';                             END IF;
+    IF inmsgn = 'AD_CURRENCYRATES_LAST'    THEN filid := '113000000184'; proid := '118000000031';                             END IF;
+    IF inmsgn = 'TD_COGS_OPERATIONS'       THEN filid := '113000000139'; proid := '118000000017'; default_sleep_time := 10;   END IF;
+    IF inmsgn = 'TD_NATUREBASED_COGS'      THEN filid := '113000000157'; proid := '118000000023';                             END IF;
+    IF inmsgn = 'TD_COGS_LATESTCOST'       THEN filid := '113000000159'; proid := '118000000024';                             END IF;
+    IF inmsgn = 'OL_FIXEDDISCOUNTS'        THEN filid := '113000000181'; proid := '118000000030';                             END IF;
+    IF inmsgn = 'OL_SALESINVOICEDISCOUNTS' THEN filid := '113000000193'; proid := '118000000029';                             END IF;
+    IF inmsgn = 'TD_ACCOUNT_MOVEMENTS'     THEN filid := '113000000187'; proid := '118000000032'; default_sleep_time := 20;   END IF;
+    IF inmsgn = 'AD_PURCHASE_AGREEMENT_PRICES' THEN filid := '113000000220'; proid := '118000000036'; default_sleep_time := 20; END IF;
+    IF inmsgn = 'MD_DELIVERYDATE'          THEN filid := '113000000203'; proid := '118000000033';                             END IF;
+    IF inmsgn = 'MD_DELIVERYGROUPS'        THEN filid := '113000000251'; proid := '118000000037';                             END IF;
+    IF inmsgn = 'AD_COUNTERUNITS'          THEN filid := '113000000254'; proid := '118000000039';                             END IF;
+    IF inmsgn = 'TD_PRODUCTION_PLAN'       THEN filid := '113000000253'; proid := '118000000038'; default_sleep_time := 20;   END IF;
+    IF inmsgn = 'TD_ACTUAL_MO_TIME'        THEN filid := '113000000258'; proid := '118000000040'; default_sleep_time := 20;   END IF;
+    IF inmsgn = 'AVG_PRICE_UNTIL'          THEN filid := '113000000264'; proid := '118000000041'; default_sleep_time := 20;   END IF;
+    IF inmsgn = 'TD_CAPEX'                 THEN filid := '113000000265'; proid := '118000000042'; default_sleep_time := 20;   END IF;
+
+    IF filid <> '1' THEN
+
+        -- Oracle: l_sql := 'select '''||create_dynamic_list(INMSGN,';')||''' from dual';
+        --         open l_cursor for l_sql; fetch l_cursor into f_fileline;
+        --         v_clob := f_fileline || chr(10); close l_cursor;
+        f_fileline := anaplan_dev.create_dynamic_list(inmsgn, ';');
+        v_clob := f_fileline || chr(10);
+
+        -- Oracle: IF INMSGN <> 'TD_SALES_SUM_DAILY' THEN l_sql := 'select ... from ANAPLAN.'||INMSGN
+        --         ELSE (date-windowed query per DIVI with add_months/sysdate)
+        IF inmsgn <> 'TD_SALES_SUM_DAILY' THEN
+            l_sql := 'SELECT ' || anaplan_dev.create_dynamic_list(inmsgn, ' || '';'' || ')
+                     || ' AS line FROM anaplan_dev.' || inmsgn;
+        ELSIF divi NOT IN ('200','700','800') THEN
+            l_sql := 'SELECT ' || anaplan_dev.create_dynamic_list(inmsgn, ' || '';'' || ')
+                     || ' AS line FROM anaplan_dev.' || inmsgn
+                     || ' WHERE division = ''' || divi || ''''
+                     || ' AND deliverydate BETWEEN TO_CHAR(CURRENT_DATE - INTERVAL ''1 month'',''YYYYMM'')||''01'''
+                     || '                      AND TO_CHAR(CURRENT_DATE,''YYYYMM'')||''31''';
+        ELSE
+            l_sql := 'SELECT ' || anaplan_dev.create_dynamic_list(inmsgn, ' || '';'' || ')
+                     || ' AS line FROM anaplan_dev.' || inmsgn
+                     || ' WHERE division = ''' || divi || ''''
+                     || ' AND deliverydate BETWEEN TO_CHAR(CURRENT_DATE + INTERVAL ''' || mont || ' months'',''YYYYMM'')||''01'''
+                     || '                      AND TO_CHAR(CURRENT_DATE + INTERVAL ''' || mont || ' months'',''YYYYMM'')||''31''';
+        END IF;
+
+        IF debug_ = 1 THEN
+            -- Oracle: DBMS_OUTPUT.put_line(l_sql);
+            RAISE NOTICE '%', l_sql;
+        END IF;
+
+        -- Oracle: open l_cursor for l_sql; fetch l_cursor into f_fileline;
+        --         if l_cursor%found then loop ... DBMS_LOB.append(v_clob,...) ... end loop; end if;
+        FOR v_row IN EXECUTE l_sql LOOP
+            v_clob := v_clob || v_row.line || chr(10);
+        END LOOP;
+
+        -- Oracle: utl_http.set_wallet(...); SEND(v_clob,'PUT','application/octet-stream','/files/'||FILID);
+        -- PG    : single http PUT - no chunking needed, PG http handles any size
+        SELECT * INTO v_response FROM http((
+            'PUT',
+            v_base_url || '/files/' || filid,
+            ARRAY[http_header('Content-Type','application/octet-stream')],
+            'application/octet-stream',
+            v_clob
+        )::http_request);
+
+        -- Oracle: IF resp.STATUS_CODE like '20%' THEN DBMS_OUTPUT.PUT_LINE('File ... OK')
+        IF v_response.status::TEXT LIKE '20%' THEN
+            RAISE NOTICE 'File % (DIVI = %) OK. Status = %', inmsgn, divi, v_response.status;
+        ELSE
+            RAISE NOTICE 'File % (DIVI = %) FAILED. Status = %', inmsgn, divi, v_response.status;
+        END IF;
+
+        -- Oracle: DBMS_LOCK.sleep(default_sleep_time);
+        PERFORM pg_sleep(default_sleep_time);
+
+        -- Oracle: SEND('{"localeName":"en_US"}','POST','application/json','/processes/'||PROID||'/tasks')
+        --         Inside SEND: if urlSuffix like '/processes/%/tasks' then
+        --           select taskid into taskid from json_table(l_response_body,'$' COLUMNS(...))
+        --           DBMS_LOCK.sleep(default_sleep_time);
+        --           SEND('','GET','application/json',urlSuffix||'/'||taskid) -- recursion
+        SELECT * INTO v_response FROM http((
+            'POST',
+            v_base_url || '/processes/' || proid || '/tasks',
+            ARRAY[http_header('Content-Type','application/json')],
+            'application/json',
+            '{"localeName":"en_US"}'
+        )::http_request);
+
+        l_response_body := v_response.content;
+
+        -- Oracle: JSON_TABLE(l_response_body,'$' COLUMNS(taskid varchar2 path '$.task.taskId'))
+        taskid := l_response_body::JSON -> 'task' ->> 'taskId';
+        -- Oracle: dbms_output.put_line('   #taskid:'||taskid);
+        RAISE NOTICE '   #taskid:%', taskid;
+
+        -- Oracle: DBMS_LOCK.sleep(default_sleep_time);
+        --         SEND('','GET','application/json',urlSuffix||'/'||taskid) -- first status poll
+        PERFORM pg_sleep(default_sleep_time);
+
+        -- Oracle: nested SEND() recursion polling task status, max counter=20
+        -- PG    : bounded WHILE loop (same logic, no recursion needed)
+        LOOP
+            SELECT * INTO v_response FROM http((
+                'GET',
+                v_base_url || '/processes/' || proid || '/tasks/' || taskid,
+                ARRAY[http_header('Content-Type','application/json')],
+                'application/json',
+                NULL
+            )::http_request);
+
+            l_response_body := v_response.content;
+
+            -- Oracle: JSON_TABLE ... $.task.currentStep
+            taskstatus := l_response_body::JSON -> 'task' ->> 'currentStep';
+
+            -- Oracle: dbms_output.put_line('   '||(case when counter>0 then counter else '' end)||'#taskstatus:'||taskstatus);
+            RAISE NOTICE '   %#taskstatus:%',
+                CASE WHEN counter > 0 THEN counter::TEXT ELSE '' END,
+                taskstatus;
+
+            -- Oracle: if (upper(trim(taskstatus)) not like 'COMPLETE%') then
+            EXIT WHEN UPPER(TRIM(taskstatus)) LIKE 'COMPLETE%';
+
+            -- Oracle: if (counter < 20) then DBMS_LOCK.sleep(...); SEND(...,counter+1)
+            --         else ve.send_mail('sidjus@...','Anaplan task execution failed!...',...)
+            --              ve.send_mail('matti.lotjonen@olvi.fi',...)
+            IF counter >= 20 THEN
+                -- Oracle: ve.send_mail(...) - cross-schema call preserved as-is
+                -- ve schema must be separately migrated
+                CALL ve.send_mail(
+                    'matti.lotjonen@olvi.fi',
+                    'Anaplan task execution failed! - ' || inmsgn,
+                    l_response_body
+                );
+                IF debug_ = 1 THEN
+                    RAISE NOTICE 'Failure email sent for %', inmsgn;
+                END IF;
+                EXIT;
+            END IF;
+
+            counter := counter + 1;
+            PERFORM pg_sleep(default_sleep_time);
+        END LOOP;
+
+    END IF;
+
+EXCEPTION
+    -- Oracle: WHEN OTHERS THEN if (DEBUG_=1) then dbms_output.put_line('ERROR Others='||SQLERRM); end if;
+    --                          utl_http.end_response(resp); utl_http.end_request(req);
+    WHEN OTHERS THEN
+        IF debug_ = 1 THEN
+            RAISE NOTICE 'ERROR Others=%', SQLERRM;
+        END IF;
+END;
+$$;
+
+COMMENT ON PROCEDURE anaplan_dev.send_data_no_chunks(VARCHAR, VARCHAR, INT, INT) IS
+    'Uploads full CSV payload as single PUT to Anaplan, triggers process, polls task status up to 20 times, emails on failure. Migrated from Oracle SEND_DATA_NO_CHUNKS - REF CURSOR->FOR EXECUTE, CLOB->TEXT, nested recursive SEND()->inlined http calls + WHILE loop, UTL_HTTP->pg_http, JSON_TABLE->JSON operator, DBMS_LOCK.sleep->pg_sleep, DBMS_OUTPUT->RAISE NOTICE, ve.send_mail preserved as cross-schema CALL.';

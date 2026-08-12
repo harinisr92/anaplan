@@ -1,0 +1,11 @@
+CREATE TABLE ref.DEPRECIATION_METHOD (
+    MATCH_TYPE TEXT,
+    KEY_VALUE  TEXT,
+    LABEL      TEXT,
+    SORT_ORDER INT
+);
+
+INSERT INTO ref.DEPRECIATION_METHOD VALUES
+('EXACT','0','Not depreciated',1),
+('EXACT','1','Linear',2),
+('EXACT','2','Declining',3);

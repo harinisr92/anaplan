@@ -1,0 +1,190 @@
+-- =============================================================================
+-- PROCEDURE: anaplan_dev.send_data()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.SEND_DATA
+-- Oracle : TYPE curtype IS REF CURSOR / OPEN l_cursor FOR dynamic SQL / FETCH loop
+--          type t_chunk IS TABLE OF varchar2(32767) / chunks collection
+--          nested PROCEDURE addToChunks(data varchar2) - builds chunk array
+--          nested PROCEDURE SEND(DATA,METHOD,iTYPE,urlSuffix) - UTL_HTTP calls
+--          UTL_HTTP.set_wallet / begin_request / write_text / get_response / end_response
+--          convert(data,'UTF8','WE8ISO8859P1') for encoding
+--          DBMS_LOCK.sleep(default_sleep_time)
+--          DBMS_OUTPUT.put_line for logging
+--          IF/IF/IF chain for FILID/PROID per INMSGN
+-- PG     : FOR loop with dynamic EXECUTE for cursor pattern
+--          TEXT[] array for chunks (replaces t_chunk collection)
+--          addToChunks logic inlined (no nested procedures in PL/pgSQL)
+--          http_post/http() from pg_http extension replaces UTL_HTTP
+--          convert() encoding -> handled at http level (UTF-8 throughout)
+--          pg_sleep() replaces DBMS_LOCK.sleep()
+--          RAISE NOTICE replaces DBMS_OUTPUT.PUT_LINE
+--          IF/IF/IF chain preserved exactly as-is (matches Oracle source)
+-- Behaviour: unchanged — builds CSV for INMSGN, uploads in chunks to Anaplan,
+--            triggers import process
+-- =============================================================================
+
+CREATE OR REPLACE PROCEDURE anaplan_dev.send_data(
+    -- Oracle: INMSGN VARCHAR2, DIVI VARCHAR2 DEFAULT '0', MONT NUMBER DEFAULT 0
+    inmsgn  VARCHAR,
+    divi    VARCHAR DEFAULT '0',
+    mont    INT     DEFAULT 0
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    filid               VARCHAR(200);
+    proid               VARCHAR(200);
+    default_sleep_time  INT := 20;
+    -- Oracle: type t_chunk is table of varchar2(32767); chunks t_chunk := t_chunk();
+    chunks              TEXT[] := ARRAY[]::TEXT[];
+    last_length         INT := 0;
+    v_row               RECORD;
+    l_sql               VARCHAR;
+    f_fileline          TEXT;
+    split_chunks_line   VARCHAR;
+    v_response          http_response;
+    v_base_url          VARCHAR := 'https://10.10.100.200/anaplan/2/0/workspaces/8a868cd97dc4162b017e59e7ad353677/models/197C1C80439046AD8BAE11CFF86C0552';
+    i                   INT;
+BEGIN
+    filid := '1';
+    proid := '1';
+
+    -- ── FILID/PROID mapping (preserved exactly from Oracle IF/IF/IF chain) ──
+    IF inmsgn = 'MD_PRODUCT'               THEN filid := '113000000194'; proid := '118000000001'; default_sleep_time := 0;   END IF;
+    IF inmsgn = 'MD_CUSTOMER'              THEN filid := '113000000195'; proid := '118000000002';                             END IF;
+    IF inmsgn = 'MD_ACCOUNT'              THEN filid := '113000000210'; proid := '118000000004';                             END IF;
+    IF inmsgn = 'MD_COSTCENTER'            THEN filid := '113000000150'; proid := '118000000003';                             END IF;
+    IF inmsgn = 'MD_WORKCENTER'            THEN filid := '113000000140'; proid := '118000000016';                             END IF;
+    IF inmsgn = 'MD_PRICELIST'             THEN filid := '113000000106'; proid := '118000000013';                             END IF;
+    IF inmsgn = 'MD_COGS_MATERIALS'        THEN filid := '113000000125'; proid := '118000000010'; default_sleep_time := 300;  END IF;
+    IF inmsgn = 'TD_GL_SUM'                THEN filid := '113000000087'; proid := '118000000008';                             END IF;
+    IF inmsgn = 'TD_SALES_SUM'             THEN filid := '113000000153'; proid := '118000000006';                             END IF;
+    IF inmsgn = 'AD_LAST_PURCH_PRICE'      THEN filid := '113000000121'; proid := '118000000021';                             END IF;
+    IF inmsgn = 'TD_MARKETINGMONEY'        THEN filid := '113000000168'; proid := '118000000020';                             END IF;
+    IF inmsgn = 'AD_MARKET_DATA'           THEN filid := '113000000165'; proid := '118000000014';                             END IF;
+    IF inmsgn = 'TD_DEPRECIATION_PLAN'     THEN filid := '113000000158'; proid := '118000000012';                             END IF;
+    IF inmsgn = 'TD_COGS_RECIPE'           THEN filid := '113000000096'; proid := '118000000011';                             END IF;
+    IF inmsgn = 'TD_DELIVERY'              THEN filid := '113000000089'; proid := '118000000007';                             END IF;
+    IF inmsgn = 'TD_SALES_SUM_DAILY'       THEN filid := '113000000093'; proid := '118000000009';                             END IF;
+    IF inmsgn = 'AD_CURRENCYRATES'         THEN filid := '113000000155'; proid := '118000000022';                             END IF;
+    IF inmsgn = 'TD_COGS_OH_COSTING'       THEN filid := '113000000199'; proid := '118000000027';                             END IF;
+    IF inmsgn = 'TD_CAMPAIGNS'             THEN filid := '113000000207'; proid := '118000000035';                             END IF;
+    IF inmsgn = 'AD_CURRENCYRATES_LAST'    THEN filid := '113000000184'; proid := '118000000031';                             END IF;
+    IF inmsgn = 'TD_COGS_OPERATIONS'       THEN filid := '113000000139'; proid := '118000000017';                             END IF;
+    IF inmsgn = 'TD_NATUREBASED_COGS'      THEN filid := '113000000157'; proid := '118000000023';                             END IF;
+    IF inmsgn = 'TD_COGS_LATESTCOST'       THEN filid := '113000000159'; proid := '118000000024';                             END IF;
+    IF inmsgn = 'OL_FIXEDDISCOUNTS'        THEN filid := '113000000181'; proid := '118000000030';                             END IF;
+    IF inmsgn = 'OL_SALESINVOICEDISCOUNTS' THEN filid := '113000000193'; proid := '118000000029';                             END IF;
+    IF inmsgn = 'TD_ACCOUNT_MOVEMENTS'     THEN filid := '113000000187'; proid := '118000000032';                             END IF;
+    IF inmsgn = 'AD_PURCHASE_AGREEMENT_PRICES' THEN filid := '113000000220'; proid := '118000000036'; default_sleep_time := 300; END IF;
+    IF inmsgn = 'MD_DELIVERYDATE'          THEN filid := '113000000203'; proid := '118000000033';                             END IF;
+    IF inmsgn = 'MD_DELIVERYGROUPS'        THEN filid := '113000000251'; proid := '118000000037';                             END IF;
+    IF inmsgn = 'AD_COUNTERUNITS'          THEN filid := '113000000254'; proid := '118000000039';                             END IF;
+    IF inmsgn = 'TD_PRODUCTION_PLAN'       THEN filid := '113000000253'; proid := '118000000038';                             END IF;
+    IF inmsgn = 'TD_ACTUAL_MO_TIME'        THEN filid := '113000000258'; proid := '118000000040';                             END IF;
+    IF inmsgn = 'TD_CAPEX'                 THEN filid := '113000000265'; proid := '118000000042';                             END IF;
+
+    IF filid <> '1' THEN
+
+        -- Oracle: l_sql := 'select ''' || create_dynamic_list(INMSGN,';') ||''' from dual';
+        --         open l_cursor for l_sql; fetch l_cursor into f_fileline; addToChunks(f_fileline||chr(10));
+        -- PG    : call function directly
+        f_fileline := anaplan_dev.create_dynamic_list(inmsgn, ';');
+        -- Oracle: addToChunks(data) - appends to current chunk or starts new if >= 10000 chars
+        IF array_length(chunks, 1) IS NULL OR last_length + length(f_fileline || chr(10)) >= 10000 THEN
+            chunks := array_append(chunks, f_fileline || chr(10));
+            last_length := length(f_fileline || chr(10));
+        ELSE
+            chunks[array_upper(chunks, 1)] := chunks[array_upper(chunks, 1)] || f_fileline || chr(10);
+            last_length := last_length + length(f_fileline || chr(10));
+        END IF;
+
+        -- Oracle: IF INMSGN <> 'TD_SALES_SUM_DAILY' THEN l_sql := 'select ... from ANAPLAN.'||INMSGN
+        --         ELSE (date-windowed query per DIVI)
+        IF inmsgn <> 'TD_SALES_SUM_DAILY' THEN
+            l_sql := 'SELECT ' || anaplan_dev.create_dynamic_list(inmsgn, ' || '';'' || ')
+                     || ' AS line FROM anaplan_dev.' || inmsgn;
+        ELSIF divi NOT IN ('200','700','800') THEN
+            l_sql := 'SELECT ' || anaplan_dev.create_dynamic_list(inmsgn, ' || '';'' || ')
+                     || ' AS line FROM anaplan_dev.' || inmsgn
+                     || ' WHERE division = ''' || divi || ''''
+                     || ' AND (deliverydate BETWEEN TO_CHAR(CURRENT_DATE - INTERVAL ''1 month'',''YYYYMM'')||''01'''
+                     || '                       AND TO_CHAR(CURRENT_DATE,''YYYYMM'')||''31'')';
+        ELSE
+            l_sql := 'SELECT ' || anaplan_dev.create_dynamic_list(inmsgn, ' || '';'' || ')
+                     || ' AS line FROM anaplan_dev.' || inmsgn
+                     || ' WHERE division = ''' || divi || ''''
+                     || ' AND (deliverydate BETWEEN TO_CHAR(CURRENT_DATE + INTERVAL ''' || mont || ' months'',''YYYYMM'')||''01'''
+                     || '                       AND TO_CHAR(CURRENT_DATE + INTERVAL ''' || mont || ' months'',''YYYYMM'')||''31'')';
+        END IF;
+
+        RAISE NOTICE '%', l_sql;
+
+        -- Oracle: open l_cursor for l_sql; fetch/loop addToChunks
+        FOR v_row IN EXECUTE l_sql LOOP
+            -- Oracle: addToChunks(f_fileline||chr(10)) -- chunk at 10000 chars
+            f_fileline := v_row.line || chr(10);
+            IF array_length(chunks, 1) IS NULL OR last_length + length(f_fileline) >= 10000 THEN
+                chunks := array_append(chunks, f_fileline);
+                last_length := length(f_fileline);
+            ELSE
+                chunks[array_upper(chunks, 1)] := chunks[array_upper(chunks, 1)] || f_fileline;
+                last_length := last_length + length(f_fileline);
+            END IF;
+        END LOOP;
+
+        -- Oracle: UTL_HTTP.set_wallet(...); split_chunks_line := '{"id":..., "chunkCount":'||chunks.COUNT||',...}';
+        --         SEND(split_chunks_line,'POST','application/json','/files/'||FILID);
+        split_chunks_line := '{"id":"' || filid || '", "name":"' || inmsgn || '.csv"'
+            || ', "chunkCount":' || array_length(chunks, 1)
+            || ', "firstDataRow":2, "headerRow":1, "separator":";"}';
+
+        SELECT * INTO v_response FROM http((
+            'POST',
+            v_base_url || '/files/' || filid,
+            ARRAY[http_header('Content-Type','application/json')],
+            'application/json',
+            split_chunks_line
+        )::http_request);
+        IF v_response.status <> 204 THEN
+            RAISE NOTICE '% DIVI=% STATUS=%', inmsgn, divi, v_response.status;
+        END IF;
+
+        -- Oracle: FOR i IN chunks.FIRST..chunks.LAST LOOP
+        --           SEND(convert(chunks(i),'UTF8','WE8ISO8859P1'),'PUT','application/octet-stream','/files/'||FILID||'/chunks/'||(i-1)||'/');
+        FOR i IN 1..array_length(chunks, 1) LOOP
+            -- Oracle: convert(chunks(i),'UTF8','WE8ISO8859P1') - encoding conversion
+            -- PG    : data is already UTF-8; no conversion needed
+            SELECT * INTO v_response FROM http((
+                'PUT',
+                v_base_url || '/files/' || filid || '/chunks/' || (i - 1) || '/',
+                ARRAY[http_header('Content-Type','application/octet-stream')],
+                'application/octet-stream',
+                chunks[i]
+            )::http_request);
+        END LOOP;
+
+        -- Oracle: DBMS_LOCK.sleep(default_sleep_time);
+        PERFORM pg_sleep(default_sleep_time);
+
+        -- Oracle: SEND('{"localeName":"en_US"}','POST','application/json','/processes/'||PROID||'/tasks');
+        SELECT * INTO v_response FROM http((
+            'POST',
+            v_base_url || '/processes/' || proid || '/tasks',
+            ARRAY[http_header('Content-Type','application/json')],
+            'application/json',
+            '{"localeName":"en_US"}'
+        )::http_request);
+
+    END IF;
+
+EXCEPTION
+    -- Oracle: WHEN OTHERS THEN dbms_output.put_line('ERROR Others='||SQLERRM);
+    --                          utl_http.end_response(resp); utl_http.end_request(req);
+    WHEN OTHERS THEN
+        RAISE NOTICE 'ERROR Others=%', SQLERRM;
+END;
+$$;
+
+COMMENT ON PROCEDURE anaplan_dev.send_data(VARCHAR, VARCHAR, INT) IS
+    'Builds CSV for INMSGN table, uploads in chunks to Anaplan, triggers import process. Migrated from Oracle SEND_DATA - REF CURSOR->FOR EXECUTE, t_chunk collection->TEXT[], addToChunks nested proc->inlined logic, UTL_HTTP->http extension, DBMS_LOCK.sleep->pg_sleep, DBMS_OUTPUT->RAISE NOTICE. IF/IF/IF FILID/PROID chain preserved exactly.';

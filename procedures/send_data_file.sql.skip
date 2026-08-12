@@ -1,0 +1,105 @@
+-- =============================================================================
+-- PROCEDURE: anaplan_dev.send_data_file()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.SEND_DATA_FILE
+-- Oracle : Same IF/IF/IF chain for FILID/PROID as SEND_DATA (different IDs)
+--          TYPE curtype IS REF CURSOR / OPEN / FETCH loop
+--          UTL_FILE.FOPEN / PUT_LINE / FCLOSE writing to f_location
+--          convert(data,'UTF8','WE8ISO8859P1') encoding
+--          DBMS_OUTPUT.put_line for logging
+-- PG     : IF/IF/IF chain preserved exactly (different file/process IDs to SEND_DATA)
+--          FOR EXECUTE loop replaces REF CURSOR
+--          pro_write_clob_to_file replaces UTL_FILE
+--          No encoding conversion needed (UTF-8 throughout in PG)
+--          RAISE NOTICE replaces DBMS_OUTPUT
+-- NOTE   : The Oracle source hardcodes the data query to TD_SALES_SUM
+--          WHERE division='800' regardless of INMSGN (commented-out generic
+--          query directly above). This appears to be debug/test code left in
+--          production. Preserved exactly as-is from Oracle source.
+-- Behaviour: unchanged — writes CSV file to CSV_DIR (no HTTP upload)
+-- =============================================================================
+
+CREATE OR REPLACE PROCEDURE anaplan_dev.send_data_file(
+    -- Oracle: INMSGN VARCHAR2
+    inmsgn VARCHAR
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    filid       VARCHAR(200);
+    proid       VARCHAR(200);
+    v_row       RECORD;
+    l_sql       VARCHAR;
+    v_content   TEXT := '';
+    v_header    VARCHAR;
+BEGIN
+    filid := '1';
+    proid := '1';
+
+    -- ── FILID/PROID mapping — DIFFERENT IDs to send_data (preserved exactly) ──
+    IF inmsgn = 'MD_PRODUCT'               THEN filid := '113000000157'; proid := '118000000001'; END IF;
+    IF inmsgn = 'MD_CUSTOMER'              THEN filid := '113000000120'; proid := '118000000002'; END IF;
+    IF inmsgn = 'MD_ACCOUNT'              THEN filid := '113000000158'; proid := '118000000004'; END IF;
+    IF inmsgn = 'MD_COSTCENTER'            THEN filid := '113000000150'; proid := '118000000003'; END IF;
+    IF inmsgn = 'MD_WORKCENTER'            THEN filid := '113000000140'; proid := '118000000016'; END IF;
+    IF inmsgn = 'MD_PRICELIST'             THEN filid := '113000000106'; proid := '118000000013'; END IF;
+    IF inmsgn = 'MD_COGS_MATERIALS'        THEN filid := '113000000125'; proid := '118000000010'; END IF;
+    IF inmsgn = 'TD_GL_SUM'                THEN filid := '113000000162'; proid := '118000000008'; END IF;
+    IF inmsgn = 'TD_SALES_SUM'             THEN filid := '113000000165'; proid := '118000000006'; END IF;
+    IF inmsgn = 'AD_LAST_PURCH_PRICE'      THEN filid := '113000000167'; proid := '118000000021'; END IF;
+    IF inmsgn = 'TD_MARKETINGMONEY'        THEN filid := '113000000173'; proid := '118000000020'; END IF;
+    IF inmsgn = 'AD_MARKET_DATA'           THEN filid := '113000000133'; proid := '118000000014'; END IF;
+    IF inmsgn = 'TD_DEPRECIATION_PLAN'     THEN filid := '113000000172'; proid := '118000000012'; END IF;
+    IF inmsgn = 'TD_COGS_RECIPE'           THEN filid := '113000000170'; proid := '118000000011'; END IF;
+    IF inmsgn = 'TD_DELIVERY'              THEN filid := '113000000171'; proid := '118000000007'; END IF;
+    IF inmsgn = 'TD_SALES_SUM_DAILY'       THEN filid := '113000000174'; proid := '118000000007'; END IF;
+    IF inmsgn = 'AD_CURRENCYRATES'         THEN filid := '113000000166'; proid := '118000000022'; END IF;
+    IF inmsgn = 'OL_FIXEDDISCOUNTS'        THEN filid := '113000000181'; proid := '118000000030'; END IF;
+    IF inmsgn = 'OL_SALESINVOICEDISCOUNTS' THEN filid := '113000000190'; proid := '118000000029'; END IF;
+    IF inmsgn = 'TD_CAMPAIGNS'             THEN filid := '113000000183'; proid := '118000000028'; END IF;
+    IF inmsgn = 'AD_CURRENCYRATES_LAST'    THEN filid := '113000000184'; proid := '118000000031'; END IF;
+    IF inmsgn = 'TD_COGS_OPERATIONS'       THEN filid := '113000000139'; proid := '118000000017'; END IF;
+    IF inmsgn = 'TD_NATUREBASED_COGS'      THEN filid := '113000000157'; proid := '118000000023'; END IF;
+    IF inmsgn = 'TD_COGS_LATESTCOST'       THEN filid := '113000000159'; proid := '118000000024'; END IF;
+    IF inmsgn = 'TD_COGS_OH_COSTING'       THEN filid := '113000000182'; proid := '118000000027'; END IF;
+    IF inmsgn = 'TD_ACCOUNT_MOVEMENTS'     THEN filid := '113000000187'; proid := '118000000032'; END IF;
+    IF inmsgn = 'MD_DELIVERYDATE'          THEN filid := '113000000203'; proid := '118000000033'; END IF;
+
+    IF filid <> '1' THEN
+
+        -- Build header row
+        v_header := anaplan_dev.create_dynamic_list(inmsgn, ';');
+        v_content := v_header || chr(10);
+
+        -- Oracle: l_sql := 'select ' || create_dynamic_list(INMSGN,' ||'';''|| ') || ' from ANAPLAN.'||INMSGN;
+        -- NOTE: The above generic query was COMMENTED OUT in Oracle source.
+        -- The live Oracle code instead hardcodes TD_SALES_SUM/division=800 regardless of INMSGN.
+        -- Preserved exactly as found — see procedure header note.
+        --
+        -- Oracle: l_sql := 'select ' || create_dynamic_list('TD_SALES_SUM',' ||'';''|| ')
+        --              || ' from anaplan.TD_SALES_SUM where division=''800'' and period between ''20230101'' and ''20230631''';
+        l_sql := 'SELECT ' || anaplan_dev.create_dynamic_list('TD_SALES_SUM', ' || '';'' || ')
+                 || ' AS line FROM anaplan_dev.td_sales_sum'
+                 || ' WHERE division = ''800'''
+                 || ' AND period BETWEEN ''20230101'' AND ''20230631''';
+
+        -- Oracle: open l_cursor for l_sql; fetch loop with UTL_FILE.PUT_LINE
+        FOR v_row IN EXECUTE l_sql LOOP
+            -- Oracle: convert(f_fileline,'UTF8','WE8ISO8859P1') — no conversion needed in PG
+            v_content := v_content || v_row.line || chr(10);
+        END LOOP;
+
+        -- Oracle: UTL_FILE.FOPEN(f_location,INMSGN||'.csv','W',32767)
+        --         UTL_FILE.PUT_LINE(f_filehand,...) / UTL_FILE.FCLOSE(f_filehand)
+        CALL anaplan_dev.pro_write_clob_to_file('CSV_DIR', inmsgn || '.csv', v_content);
+
+    END IF;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE NOTICE 'ERROR Others=%', SQLERRM;
+END;
+$$;
+
+COMMENT ON PROCEDURE anaplan_dev.send_data_file(VARCHAR) IS
+    'Builds CSV for INMSGN and writes to CSV_DIR (no HTTP upload). Migrated from Oracle SEND_DATA_FILE - REF CURSOR->FOR EXECUTE, UTL_FILE->pro_write_clob_to_file. NOTE: data query hardcoded to td_sales_sum/division=800 as in original Oracle source (generic query was commented out in Oracle). FILID/PROID values different from send_data - preserved exactly.';

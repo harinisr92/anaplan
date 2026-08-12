@@ -1,0 +1,116 @@
+-- =============================================================================
+-- PROCEDURE: anaplan_dev.get_file()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.GET_file
+-- Oracle : Nested local PROCEDURE SEND() using UTL_HTTP
+--          UTL_HTTP.set_wallet for SSL
+--          DBMS_LOCK.SLEEP(125) for delay
+--          DBMS_LOB.createtemporary / dbms_lob.append / DBMS_LOB.freetemporary
+--          UTL_FILE.FREMOVE / DBMS_LOB.FILEEXISTS(BFILENAME('CSV_DIR',...))
+--          UTL_HTTP.read_text loop to accumulate response body
+--          anaplan.PRO_WRITE_CLOB_TO_FILE to write file
+--          resp.status_code = utl_http.HTTP_OK check
+--          DBMS_OUTPUT.PUT_LINE for logging
+-- PG     : http_post / http_get from pg_http extension
+--          pg_sleep() replaces DBMS_LOCK.SLEEP()
+--          TEXT accumulation replaces CLOB temporary LOB
+--          CALL anaplan_dev.pro_write_clob_to_file() for file write
+--          RAISE NOTICE replaces DBMS_OUTPUT.PUT_LINE
+--          SSL configured at libpq level, no set_wallet needed
+-- Behaviour: unchanged — triggers Anaplan process, waits 125s,
+--            downloads result file and writes to CSV_DIR
+-- =============================================================================
+
+CREATE OR REPLACE PROCEDURE anaplan_dev.get_file(
+    -- Oracle: model_ varchar, file_ varchar, proc_ varchar
+    model_  VARCHAR,
+    file_   VARCHAR,
+    proc_   VARCHAR
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    -- Oracle: req utl_http.req; resp utl_http.resp;
+    --         l_response_header_name varchar2(256);
+    --         l_response_header_value varchar2(1024);
+    --         v_resp_chunked varchar2(32767); l_content_length NUMBER(8);
+    --         workspace varchar2(200) := '8a868cdc877bb0da018807e8234b6307';
+    --         v_resp CLOB;
+    v_workspace   VARCHAR := '8a868cdc877bb0da018807e8234b6307';
+    v_base_url    VARCHAR := 'https://10.10.100.200/anaplan/2/0';
+    v_response    http_response;
+    v_resp        TEXT;    -- Oracle CLOB -> PG TEXT
+    v_header      http_header;
+BEGIN
+    -- Oracle: nested PROCEDURE SEND() -> UTL_HTTP.begin_request POST /processes/.../tasks
+    -- PG    : http_post()
+    -- DBMS_OUTPUT.PUT_LINE(url); -- kept as RAISE DEBUG
+    RAISE NOTICE '%', v_base_url || '/workspaces/' || v_workspace || '/models/' || model_ || '/processes/' || proc_ || '/tasks';
+
+    -- Oracle: UTL_HTTP.set_wallet(path=>'file:/u01/.../wallet', password=>'WalletPasswd123');
+    -- PG    : SSL at libpq level - no per-call wallet
+
+    SELECT * INTO v_response
+    FROM http_post(
+        v_base_url || '/workspaces/' || v_workspace || '/models/' || model_ || '/processes/' || proc_ || '/tasks',
+        '{"localeName":"en_US"}',
+        'application/json'
+    );
+
+    -- Oracle: DBMS_LOCK.SLEEP(125);
+    -- PG    : pg_sleep()
+    PERFORM pg_sleep(125);
+
+    RAISE NOTICE '%', v_base_url || '/workspaces/' || v_workspace || '/models/' || model_ || '/files/' || file_;
+
+    -- Oracle: req := UTL_HTTP.begin_request(url=>..., method=>'GET', http_version=>'HTTP/1.1')
+    --         for i in 1..utl_http.get_header_count(resp) loop ... end loop;
+    -- PG    : http_get() returns headers as array
+    SELECT * INTO v_response
+    FROM http_get(
+        v_base_url || '/workspaces/' || v_workspace || '/models/' || model_ || '/files/' || file_
+    );
+
+    -- Oracle: for i in 1..utl_http.get_header_count(resp) loop
+    --           utl_http.get_header(resp,i,name,value);
+    --           dbms_output.put_line('Response Header> '||name||': '||value);
+    --         end loop;
+    FOREACH v_header IN ARRAY v_response.headers LOOP
+        RAISE NOTICE 'Response Header> %: %', v_header.field, v_header.value;
+    END LOOP;
+
+    -- Oracle: DBMS_LOB.createtemporary(v_resp, FALSE);
+    --         loop utl_http.read_text(resp, v_resp_chunked, 32767);
+    --              dbms_lob.append(v_resp, v_resp_chunked);
+    --         end loop;
+    -- PG    : response body already in v_response.content as TEXT
+    -- Oracle: -- 20230911 no need for this INSERT INTO anaplan.http_blob_test ...
+    v_resp := v_response.content;
+
+    -- Oracle: if DBMS_LOB.FILEEXISTS(BFILENAME('CSV_DIR',file_||'.csv'))=1 then
+    --           utl_file.fremove('CSV_DIR',file_||'.csv'); end if;
+    -- PG    : pg_file_write with append=false overwrites automatically
+
+    -- Oracle: anaplan.PRO_WRITE_CLOB_TO_FILE('CSV_DIR', file_||'.csv', v_resp);
+    CALL anaplan_dev.pro_write_clob_to_file('CSV_DIR', file_ || '.csv', v_resp);
+
+    -- Oracle: DBMS_LOB.freetemporary(v_resp);
+    -- PG    : no action needed - TEXT is garbage collected automatically
+
+    -- Oracle: IF resp.status_code = utl_http.HTTP_OK AND resp.reason_phrase='OK'
+    IF v_response.status = 200 THEN
+        RAISE NOTICE 'Webservice without errors';
+    ELSE
+        RAISE NOTICE 'Webservice errors=%', v_response.status;
+    END IF;
+
+EXCEPTION
+    -- Oracle: WHEN OTHERS THEN dbms_output.put_line('ERROR Others='||SQLERRM);
+    --                          utl_http.end_response(resp);
+    WHEN OTHERS THEN
+        RAISE NOTICE 'ERROR Others=%', SQLERRM;
+END;
+$$;
+
+COMMENT ON PROCEDURE anaplan_dev.get_file(VARCHAR, VARCHAR, VARCHAR) IS
+    'Triggers Anaplan export process, waits 125s, downloads and writes result file to CSV_DIR. Migrated from Oracle GET_file - UTL_HTTP/DBMS_LOB/UTL_FILE replaced with pg_http+pg_sleep+pro_write_clob_to_file. Workspace ID hardcoded as in original.';

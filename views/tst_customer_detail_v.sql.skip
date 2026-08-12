@@ -1,0 +1,159 @@
+-- =============================================================================
+-- VIEW: anaplan_dev.tst_customer_detail_v
+-- Purpose: Standalone PostgreSQL conversion of Oracle ANAPLAN.TST_CUSTOMER_DETAIL.
+-- Important: This version does NOT select from anaplan_dev.md_customer_detail_v.
+-- It is based on source tables from the Oracle definition.
+--
+-- INVESTIGATION (this conversion pass): confirmed via live Oracle data that
+-- TST_CUSTOMER_DETAIL's l2_saleschannel logic diverges from MD_CUSTOMER_
+-- DETAIL's — misclassifies HORECA customers as RETAIL for at least 50/50
+-- sampled customers, because it's missing MD's okcfc3/okacrf-based rules.
+-- all_dependencies returned 0 rows — nothing inside Oracle references this
+-- view. Decision: convert faithfully as its own distinct object (own
+-- ref_dev tables, own rule_ids — NOT sharing MD_CUSTOMER_DETAIL's), bugs
+-- included, rather than aligning it to MD's logic or dropping it. Whether
+-- Anaplan or an external tool queries it directly (outside Oracle's own
+-- dependency tracking) is still unconfirmed — worth checking before this
+-- is relied on for anything.
+--
+-- NOTE ABOUT AD_CHARGEMODEL:
+-- The original Oracle TST_CUSTOMER_DETAIL references ANAPLAN.AD_CHARGEMODEL.
+-- To avoid view-over-view dependency, this script references anaplan_dev.ad_chargemodel
+-- as a base table/physical object. If your environment only has ad_chargemodel_v as a
+-- view, create/materialize anaplan_dev.ad_chargemodel first from its original table logic.
+-- =============================================================================
+
+CREATE OR REPLACE VIEW anaplan_dev.tst_customer_detail_v AS
+WITH customer_selection AS (
+    SELECT DISTINCT divi, cuno
+    FROM (
+        SELECT okdivi AS divi, okcuno AS cuno FROM mvxjdta.ccudiv
+        UNION ALL
+        SELECT okrasn AS divi, okcuno AS cuno FROM mvxjdta.ocusma
+    ) s
+    WHERE divi <> ' '
+),
+opla AS (
+    SELECT eaaitm
+    FROM mvxjdta.fchacc
+    WHERE eacono = 100
+      AND eadivi = '100'
+      AND eaaitp = '2'
+      AND earesp = 'PLANNING'
+)
+SELECT
+    CAST(cs.divi AS VARCHAR(108)) AS division,
+    CAST((CASE
+        WHEN cu.okcucl IN (SELECT code FROM ref_dev.l1_region_codes WHERE rule_id = 'l1_rule_5')  THEN 'EXPORT'
+        WHEN cu.okcucl IN (SELECT code FROM ref_dev.l1_region_codes WHERE rule_id = 'l1_rule_6')  THEN 'TRAVELTRADE'
+        WHEN cu.okacrf BETWEEN '4410' AND '4449' THEN 'EXPORT'
+        WHEN cu.okacrf = 'L9000' THEN 'GROUP'
+        WHEN cu.okcucl IN (SELECT code FROM ref_dev.l1_region_codes WHERE rule_id = 'l1_rule_9')  THEN 'GROUP'
+        ELSE 'DOMESTIC'
+    END) AS VARCHAR(108)) AS l1_region,
+    CAST((CASE
+        WHEN cu.okcucl IN (SELECT code FROM ref_dev.tst_l2_saleschannel_codes WHERE rule_id = 'tst_l2_rule_1')  THEN 'RETAIL'  -- ',218' malformed literal preserved as-is, NOT bug-fixed (see ref_dev.tst_l2_saleschannel_codes header)
+        WHEN cu.okacrf = 'L9000' THEN 'GROUP'
+        WHEN cu.okcucl BETWEEN '400' AND '408' THEN 'RETAIL'
+        WHEN cu.okpyno IN (SELECT code FROM ref_dev.tst_l2_saleschannel_codes WHERE rule_id = 'tst_l2_rule_4')  THEN 'RETAIL'
+        WHEN cu.okcucl IN (SELECT code FROM ref_dev.tst_l2_saleschannel_codes WHERE rule_id = 'tst_l2_rule_5')  THEN 'HORECA'
+        WHEN cu.okcucl IN (SELECT code FROM ref_dev.tst_l2_saleschannel_codes WHERE rule_id = 'tst_l2_rule_6') AND cu.okcfc3 = 'SK' THEN 'HORECA'
+        WHEN cu.okcucl BETWEEN '891' AND '896' THEN 'HORECA'
+        WHEN cu.okcucl IN (SELECT code FROM ref_dev.tst_l2_saleschannel_codes WHERE rule_id = 'tst_l2_rule_8')  THEN 'TRAVELTRADE'
+        WHEN cu.okcucl IN (SELECT code FROM ref_dev.tst_l2_saleschannel_codes WHERE rule_id = 'tst_l2_rule_9')  THEN 'EXPORT'
+        WHEN cu.okacrf BETWEEN '4410' AND '4449' THEN 'EXPORT'
+        WHEN cu.okcucl IN (SELECT code FROM ref_dev.tst_l2_saleschannel_codes WHERE rule_id = 'tst_l2_rule_11')  THEN 'GROUP'
+        WHEN cu.okcfc1 NOT IN (SELECT code FROM ref_dev.tst_l2_saleschannel_codes WHERE rule_id = 'tst_l2_rule_12')  THEN 'RETAIL'
+        ELSE 'WHOLESALES'
+    END) AS VARCHAR(108)) AS l2_saleschannel,
+    CAST((CASE
+        WHEN cu.okrasn = '800' THEN CASE WHEN cu.okfre1 = ' ' THEN 'NA' ELSE fr1.cttx40 END
+        WHEN cu.okcucl BETWEEN '905' AND '909' THEN ct4.cttx40
+        WHEN cu.okacrf = 'L9000' OR cu.okcucl = '910' THEN UPPER(py.okcunm || ' (' || py.okcuno || ')')
+        WHEN cu.okrasn IN ('100','300') AND cu.okcucl <> '910' THEN CASE WHEN opla.eaaitm IS NULL THEN 'OTHER' ELSE ea1.cttx40 END
+        ELSE CASE WHEN cu.okcucl = ' ' THEN 'OTHER' ELSE ct1.cttx40 END
+    END) AS VARCHAR(108)) AS l3_customergroup,
+    CAST((CASE
+        WHEN cu.okcucl = '910' OR cu.okacrf = 'L9000' THEN UPPER(py.okcunm || ' (' || py.okcuno || ')')
+        WHEN cu.okcucl BETWEEN '905' AND '909' THEN ct9.cttx15
+        WHEN cu.okrasn IN ('100','300') AND cu.okcucl <> '910' THEN CASE WHEN opla.eaaitm IS NULL THEN 'OTHER' ELSE ea1.cttx40 END
+        WHEN cu.okrasn IN ('200','600') AND cu.okcfc8 <> ' ' THEN ct10.cttx40
+        WHEN cu.okcfc1 IN (' ') THEN 'NO CHAIN'
+        ELSE ct8.cttx40
+    END) AS VARCHAR(108)) AS l4_chain,
+    CAST((CASE
+        WHEN cu.okcucl BETWEEN '905' AND '910' OR cu.okacrf = 'L9000' THEN
+            CASE WHEN py.okcunm IS NULL THEN UPPER(cu.okcunm || ' (' || cu.okcuno || ')') ELSE UPPER(py.okcunm || ' (' || py.okcuno || ')') END
+        WHEN cu.okrasn IN ('100','300') AND cu.okcucl <> '910' THEN CASE WHEN opla.eaaitm IS NULL THEN 'OTHER' ELSE ea1.cttx40 END
+        WHEN cu.okrasn IN ('200','600') AND cu.okcfc8 <> ' ' THEN ct10.cttx40
+        WHEN cu.okcfc1 IN (' ') THEN 'NO CHAIN'
+        ELSE ct8.cttx40
+    END) AS VARCHAR(108)) AS l5_customer,
+    CAST((
+        CASE WHEN cm.excise IS NULL THEN 'no excise' ELSE CASE cm.excise WHEN 'YES' THEN 'excise' WHEN 'NO' THEN 'no excise' ELSE cm.excise END END
+        || '-' ||
+        CASE WHEN cm.depofee IS NULL THEN 'no deposit' ELSE CASE cm.depofee WHEN 'YES' THEN 'deposit' WHEN 'NO' THEN 'no deposit' ELSE cm.depofee END END
+    ) AS VARCHAR(108)) AS l6_excise_depo,
+    CAST((CASE
+        WHEN cu.okrasn = '800' THEN CASE WHEN cu.okfre1 = ' ' THEN '888' ELSE cu.okfre1 END
+        WHEN cu.okcucl BETWEEN '905' AND '909' THEN cu.oksmcd
+        WHEN cu.okacrf = 'L9000' OR cu.okcucl = '910' THEN py.okcuno
+        WHEN cu.okrasn IN ('100','300') AND cu.okcucl <> '910' THEN CASE WHEN opla.eaaitm IS NULL THEN '9999' ELSE cu.okacrf END
+        ELSE CASE WHEN cu.okcucl = ' ' THEN '999' ELSE cu.okcucl END
+    END) AS VARCHAR(108)) AS l3_code,
+    CAST((CASE
+        WHEN cu.okcucl = '910' OR cu.okacrf = 'L9000' THEN py.okcuno
+        WHEN cu.okcucl BETWEEN '905' AND '909' THEN cu.okcscd
+        WHEN cu.okrasn IN ('100','300') AND cu.okcucl <> '910' THEN CASE WHEN opla.eaaitm IS NULL THEN '9999' ELSE cu.okacrf END
+        WHEN cu.okrasn IN ('200','600') AND cu.okcfc8 <> ' ' THEN cu.okcfc8
+        WHEN cu.okcfc1 IN (' ') THEN '999'
+        ELSE cu.okcfc1
+    END) AS VARCHAR(108)) AS l4_code,
+    CAST((CASE
+        WHEN cu.okcucl BETWEEN '905' AND '910' OR cu.okacrf = 'L9000' THEN CASE WHEN py.okcuno IS NULL THEN cu.okcuno ELSE py.okcuno END
+        WHEN cu.okrasn IN ('100','300') AND cu.okcucl <> '910' THEN CASE WHEN opla.eaaitm IS NULL THEN '9999' ELSE cu.okacrf END
+        WHEN cu.okrasn IN ('200','600') AND cu.okcfc8 <> ' ' THEN cu.okcfc8
+        WHEN cu.okcfc1 IN (' ') THEN '999'
+        ELSE cu.okcfc1
+    END) AS VARCHAR(108)) AS l5_code,
+    CAST((
+        CASE WHEN cm.excise IS NULL THEN '0' ELSE CASE cm.excise WHEN 'YES' THEN '1' WHEN 'NO' THEN '0' ELSE cm.excise END END
+        || '-' ||
+        CASE WHEN cm.depofee IS NULL THEN '0' ELSE CASE cm.depofee WHEN 'YES' THEN '1' WHEN 'NO' THEN '0' ELSE cm.depofee END END
+    ) AS VARCHAR(108)) AS l6_code,
+    CAST((cu.okcunm || ' (' || cu.okcuno || ')') AS VARCHAR(108)) AS shop,
+    CAST(cu.okchsy AS VARCHAR(108)) AS chargemodel,
+    CAST(cu.okcuno AS VARCHAR(108)) AS m3customercode,
+    CAST(cu.okstat AS VARCHAR(108)) AS m3status,
+    CAST((CASE WHEN cm.excise IS NULL THEN 'NO' ELSE cm.excise END) AS VARCHAR(3)) AS excise,
+    CAST((CASE WHEN cm.depofee IS NULL THEN 'NO' ELSE cm.depofee END) AS VARCHAR(3)) AS depofee,
+    CAST((CASE
+        WHEN cu.okrasn = '200' AND cu.okcucl IN ('900','901','903') THEN 'TT-2A0'
+        WHEN cu.okrasn = '200' AND cu.okcucl < '900' THEN 'DOM-2A0'
+        WHEN cu.okrasn = '600' AND cu.okcucl < '900' THEN '6R1'
+        WHEN cu.okrasn = '700' AND cu.okcucl < '900' THEN '7C1'
+        ELSE 'NA'
+    END) AS VARCHAR(108)) AS pricelist_ref,
+    CAST('NA' AS VARCHAR(108)) AS bonusgroup_ref,
+    CAST('NA' AS VARCHAR(108)) AS discountgroup_ref,
+    CAST((CASE WHEN cu.okmodl = '03' OR cu.okmodl = ' ' THEN 'NA' ELSE modl.cttx15 END) AS VARCHAR(108)) AS deliverygroup,
+    CAST((CASE WHEN cu.okmodl = '03' OR cu.okmodl = ' ' THEN '999' ELSE cu.okmodl END) AS VARCHAR(108)) AS deliverygroup_code
+FROM customer_selection cs
+LEFT JOIN mvxjdta.ocusma cu ON cs.cuno = cu.okcuno
+LEFT JOIN mvxjdta.ocusma py ON cu.okcono = py.okcono AND py.okcuno = cu.okpyno
+LEFT JOIN mvxjdta.csytab ct1 ON cu.okcono = ct1.ctcono AND ct1.ctstco = 'CUCL' AND ct1.ctstky = cu.okcucl AND ct1.ctdivi = ' '
+LEFT JOIN mvxjdta.csytab ct4 ON cu.okcono = ct4.ctcono AND ct4.ctstco = 'SMCD' AND ct4.ctstky = cu.oksmcd AND ct4.ctdivi = ' '
+LEFT JOIN mvxjdta.csytab ct8 ON cu.okcono = ct8.ctcono AND ct8.ctstco = 'CFC1' AND ct8.ctstky = cu.okcfc1 AND ct8.ctdivi = ' '
+LEFT JOIN mvxjdta.csytab ct9 ON cu.okcono = ct9.ctcono AND ct9.ctstco = 'CSCD' AND ct9.ctstky = cu.okcscd AND ct9.ctdivi = ' '
+LEFT JOIN mvxjdta.csytab ct10 ON cu.okcono = ct10.ctcono AND ct10.ctstco = 'CFC8' AND ct10.ctstky = cu.okcfc8 AND ct10.ctdivi = ' '
+LEFT JOIN mvxjdta.csytab ea1 ON cu.okcono = ea1.ctcono AND ea1.ctstky = TRIM(cu.okacrf) AND ea1.ctstco = 'ACRF' AND ea1.ctdivi = ' '
+LEFT JOIN mvxjdta.csytab fr1 ON cu.okcono = fr1.ctcono AND fr1.ctstco = 'FRE1' AND fr1.ctstky = cu.okfre1
+LEFT JOIN anaplan_dev.ad_chargemodel cm ON cu.okchsy = cm.chargemodel
+LEFT JOIN mvxjdta.csytab modl ON modl.ctcono = cu.okcono AND modl.ctstco = 'MODL' AND modl.ctlncd = cu.oklhcd AND modl.ctstky <> '03' AND cu.okmodl = modl.ctstky
+LEFT JOIN opla ON cu.okacrf = opla.eaaitm
+WHERE cu.okcono = 100
+  AND cu.okcutp NOT IN ('8','9')
+  AND (cu.okrasn || '-' || cu.okcutp) <> '100-2';
+
+COMMENT ON VIEW anaplan_dev.tst_customer_detail_v IS
+    'Standalone conversion from Oracle ANAPLAN.TST_CUSTOMER_DETAIL; converted from source-table logic, not from md_customer_detail_v.';

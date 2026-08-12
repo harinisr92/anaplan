@@ -1,0 +1,38 @@
+-- =============================================================================
+-- PROCEDURE: anaplan_dev.pro_write_clob_to_file()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.pro_write_clob_to_file
+-- Oracle : DBMS_XSLPROCESSOR.clob2file(in_clob, in_dir_name, in_file_name)
+--          in_dir_name is an Oracle DIRECTORY object name (e.g. 'CSV_DIR')
+-- PG     : pg_file_write(path, content, append) from adminpack extension
+--          Oracle DIRECTORY object -> filesystem path via GUC anaplan.csv_dir_path
+--          CLOB -> TEXT (PG has no separate CLOB type)
+-- Behaviour: unchanged — writes text content to a file on the DB server
+-- Requires : CREATE EXTENSION IF NOT EXISTS adminpack;
+--            ALTER SYSTEM SET anaplan.csv_dir_path = '/path/to/csv/dir';
+-- =============================================================================
+
+CREATE OR REPLACE PROCEDURE anaplan_dev.pro_write_clob_to_file(
+    -- Oracle: in_dir_name IN VARCHAR2, in_file_name IN VARCHAR2, in_clob IN CLOB
+    in_dir_name  VARCHAR,   -- kept for signature compatibility; actual path from GUC
+    in_file_name VARCHAR,
+    in_clob      TEXT       -- Oracle CLOB -> PG TEXT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    -- Oracle: no additional variables needed
+    -- PG    : resolve full path from GUC (replaces Oracle DIRECTORY object)
+    v_csv_dir VARCHAR := current_setting('anaplan.csv_dir_path', true);
+    v_path    VARCHAR;
+BEGIN
+    v_path := v_csv_dir || '/' || in_file_name;
+
+    -- Oracle: DBMS_XSLPROCESSOR.clob2file(in_clob, in_dir_name, in_file_name);
+    -- PG    : pg_file_write(filename, data, append)
+    PERFORM pg_file_write(v_path, in_clob, false);
+END;
+$$;
+
+COMMENT ON PROCEDURE anaplan_dev.pro_write_clob_to_file(VARCHAR, VARCHAR, TEXT) IS
+    'Writes text content to a server-side file. Migrated from Oracle pro_write_clob_to_file - DBMS_XSLPROCESSOR.clob2file replaced with pg_file_write (adminpack). in_dir_name parameter kept for signature compatibility; actual path from anaplan.csv_dir_path GUC.';

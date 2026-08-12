@@ -1,0 +1,43 @@
+-- =============================================================================
+-- FUNCTION: anaplan_dev.create_dynamic_list()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.CREATE_DYNAMIC_LIST
+-- Oracle : EXECUTE IMMEDIATE with LISTAGG ... WITHIN GROUP (ORDER BY COLUMN_NAME)
+--          querying user_tab_columns
+-- PG     : Direct SELECT with string_agg ... ORDER BY column_name
+--          querying information_schema.columns
+--          No EXECUTE IMMEDIATE needed - information_schema is a plain view
+-- Behaviour: unchanged — returns delimited list of column names for a table,
+--            ordered alphabetically, matching Oracle LISTAGG ORDER BY behaviour
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION anaplan_dev.create_dynamic_list(
+    table_name  VARCHAR,
+    delimiter   VARCHAR
+)
+RETURNS VARCHAR
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    -- Oracle: str VARCHAR2(32767); sql_str VARCHAR2(32767);
+    str     VARCHAR;
+    sql_str VARCHAR;
+BEGIN
+    -- Oracle: sql_str := 'SELECT LISTAGG(COLUMN_NAME, '''||delimiter||''')
+    --                     WITHIN GROUP (ORDER BY COLUMN_NAME)
+    --                     FROM user_tab_columns WHERE TABLE_NAME = '''||table_name||'''';
+    --         EXECUTE IMMEDIATE sql_str into str;
+    -- PG    : Direct query - no dynamic SQL needed
+    -- DBMS_OUTPUT.PUT_LINE(sql_str); -- kept as comment for traceability
+
+    SELECT string_agg(column_name, delimiter ORDER BY column_name)
+      INTO str
+      FROM information_schema.columns
+     WHERE table_name = create_dynamic_list.table_name;
+
+    RETURN str;
+END;
+$$;
+
+COMMENT ON FUNCTION anaplan_dev.create_dynamic_list(VARCHAR, VARCHAR) IS
+    'Returns delimited alphabetical column name list for a table. Migrated from Oracle CREATE_DYNAMIC_LIST - EXECUTE IMMEDIATE + LISTAGG + user_tab_columns replaced with string_agg + information_schema.columns.';

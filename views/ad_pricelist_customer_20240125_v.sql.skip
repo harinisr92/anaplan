@@ -1,0 +1,44 @@
+-- =============================================================================
+-- VIEW: anaplan_dev.ad_pricelist_customer_20240125_v
+-- Purpose: Standalone PostgreSQL conversion of Oracle ANAPLAN.AD_PRICELIST_CUSTOMER_20240125
+-- Important: This version is based on source tables only. It does NOT select from
+--            anaplan_dev.ad_pricelist_customer_v or any other PostgreSQL view.
+-- Source Oracle definition was provided in missing_views_in_pg_but_in_oracle.txt.
+-- =============================================================================
+
+CREATE OR REPLACE VIEW anaplan_dev.ad_pricelist_customer_20240125_v AS
+SELECT
+    SUBSTRING(ob.odprrf FROM 1 FOR 1) || '00' AS division,
+    ob.odcuno AS customer1,
+    'L2'::text AS customer2,
+    'L3'::text AS customer3,
+    ob.odprrf || '-' || ob.odcuno AS pricelist_ref,
+    ob.oditno AS itemcode,
+    ob.odsapr AS price
+FROM mvxjdta.oprbas ob
+INNER JOIN (
+    SELECT
+        odprrf AS prrf,
+        odcuno AS cuno,
+        MAX(odfvdt) AS fvdt,
+        odcono AS cono
+    FROM mvxjdta.oprbas
+    WHERE odcuno <> ' '
+      AND odlvdt >= TO_CHAR(CURRENT_DATE, 'YYYYMMDD')::integer
+      AND odfvdt <= TO_CHAR(CURRENT_DATE, 'YYYYMMDD')::integer
+    GROUP BY odprrf, odcuno, odcono
+) temp
+    ON temp.cuno = ob.odcuno
+   AND temp.cono = ob.odcono
+   AND temp.prrf = ob.odprrf
+   AND ob.odfvdt = temp.fvdt
+INNER JOIN mvxjdta.ocusma cu
+    ON cu.okcono = 100
+   AND cu.okcuno = ob.odcuno
+WHERE ob.odcono = 100
+  AND cu.okcucl BETWEEN '900' AND '910'
+  AND SUBSTRING(ob.odprrf FROM 1 FOR 1) IN ('6', '7', '4')
+  AND ob.odprrf NOT IN ('7C1', '6R1', '2A0');
+
+COMMENT ON VIEW anaplan_dev.ad_pricelist_customer_20240125_v IS
+    'Standalone conversion from Oracle ANAPLAN.AD_PRICELIST_CUSTOMER_20240125; source-table based, no view dependency.';

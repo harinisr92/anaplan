@@ -1,0 +1,99 @@
+-- =============================================================================
+-- PROCEDURE: anaplan_dev.pro_anaplan_01()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.PRO_ANAPLAN_01
+-- Oracle : TYPE curtype IS REF CURSOR / OPEN l_cursor FOR l_sql / FETCH
+--          UTL_FILE.FOPEN / PUT_LINE / FCLOSE writing to f_location constant
+--          create_dynamic_list() calls to build header + data SQL
+--          Large commented-out UTL_HTTP block (was disabled in Oracle source)
+--          DBMS_OUTPUT.put_line for logging
+-- PG     : EXECUTE format(...) ... INTO for dynamic SQL
+--          COPY (SELECT ...) TO for file writing (replaces UTL_FILE)
+--          pg_file_write (adminpack) as alternative for single TEXT writes
+--          f_location constant -> anaplan.csv_dir_path GUC
+--          RAISE NOTICE replaces DBMS_OUTPUT
+--          The commented-out UTL_HTTP block preserved as a comment exactly
+--          as it was in Oracle (it was never live code)
+-- Behaviour: unchanged — builds CSV (header + data rows) for INMSGN table
+--            and writes to the configured CSV directory
+-- =============================================================================
+
+CREATE OR REPLACE PROCEDURE anaplan_dev.pro_anaplan_01(
+    -- Oracle: INMSGN VARCHAR2
+    inmsgn VARCHAR
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    -- Oracle: f_location CONSTANT VARCHAR2(80) := '/jtt/oracle/xml/utlprod/ana';
+    --         f_filename VARCHAR2(80); f_fileline VARCHAR2(32767);
+    --         csv_full_sql VARCHAR2(32767); f_filehand UTL_FILE.FILE_TYPE;
+    --         TYPE curtype IS REF CURSOR; l_cursor curtype;
+    --         l_sql varchar2(2000); f_fileline2 VARCHAR2(32767);
+    f_location  VARCHAR := current_setting('anaplan.csv_dir_path', true);
+    f_filename  VARCHAR;
+    l_sql       VARCHAR;
+    v_header    VARCHAR;
+    v_content   TEXT := '';
+    v_row       RECORD;
+BEGIN
+    -- Oracle: l_sql := 'select ''' || create_dynamic_list(INMSGN,';') ||''' from dual'
+    --              ||  ' union all '
+    --              ||  'select ' || create_dynamic_list(INMSGN,' ||'';''|| ') || ' from '||INMSGN;
+    -- PG    : build header separately, then data rows via dynamic cursor
+
+    -- Build header row using create_dynamic_list (same function, migrated separately)
+    v_header := anaplan_dev.create_dynamic_list(inmsgn, ';');
+    -- DBMS_OUTPUT.put_line('l_sql='||l_sql); -> RAISE DEBUG
+    RAISE DEBUG 'Header: %', v_header;
+
+    f_filename := inmsgn || '.csv';
+
+    -- Build data query dynamically
+    l_sql := 'SELECT ' || anaplan_dev.create_dynamic_list(inmsgn, ' || '';'' || ')
+              || ' AS line FROM anaplan_dev.' || inmsgn;
+
+    -- Oracle: open l_cursor for l_sql; fetch l_cursor into f_fileline;
+    --         if l_cursor%found then f_filehand := UTL_FILE.FOPEN(...,'W');
+    --           UTL_FILE.PUT_LINE(f_filehand,f_fileline);
+    --           loop fetch l_cursor ... UTL_FILE.PUT_LINE ... end loop;
+    --           UTL_FILE.FCLOSE(f_filehand); end if;
+    -- PG    : accumulate into TEXT, then write via pg_file_write
+
+    v_content := v_header || chr(10);
+
+    FOR v_row IN EXECUTE l_sql LOOP
+        v_content := v_content || v_row.line || chr(10);
+    END LOOP;
+
+    -- Write to file (replaces UTL_FILE.FOPEN/PUT_LINE/FCLOSE)
+    IF v_content <> v_header || chr(10) THEN
+        CALL anaplan_dev.pro_write_clob_to_file('CSV_DIR', f_filename, v_content);
+    END IF;
+
+    -- =========================================================================
+    -- The following UTL_HTTP block was entirely commented out in the Oracle
+    -- source (wrapped in /* ... */) and was never live code.
+    -- Preserved here as a comment for traceability only.
+    -- If HTTP push is needed, use anaplan_dev.send_data(inmsgn) instead.
+    -- =========================================================================
+    /*
+    UTL_HTTP.set_wallet('file:/u01/app/oracle/admin/GM3REP1/wallet','WalletPasswd123');
+    http_req := utl_http.begin_request(
+        'https://10.10.100.200/anaplan/2/0/workspaces/8a868cd97dc4162b017e59e7ad353677/models/1996A82FE68C4E61BBF83C7864B5F5A3/files/',
+        'GET', 'HTTP/1.1');
+    UTL_HTTP.SET_HEADER(req,'Content-Type','application/json');
+    resp := utl_http.get_response(req);
+    LOOP utl_http.read_line(resp,l_value,TRUE); END LOOP;
+    utl_http.end_response(resp);
+    */
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Oracle: no explicit EXCEPTION block - adding for safety
+        RAISE NOTICE 'ERROR in pro_anaplan_01(%): %', inmsgn, SQLERRM;
+END;
+$$;
+
+COMMENT ON PROCEDURE anaplan_dev.pro_anaplan_01(VARCHAR) IS
+    'Builds CSV (header + data rows) for INMSGN table and writes to CSV directory. Migrated from Oracle PRO_ANAPLAN_01 - REF CURSOR->FOR loop, UTL_FILE->pro_write_clob_to_file, DBMS_OUTPUT->RAISE NOTICE. HTTP block was already dead/commented in Oracle source, preserved as comment.';

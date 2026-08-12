@@ -1,0 +1,74 @@
+-- =============================================================================
+-- FUNCTION: anaplan_dev.reencode()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.REENCODE
+-- Oracle : UTL_RAW.cast_to_raw / UTL_I18N.raw_to_char / UTL_RAW.cast_to_varchar2
+--          RAWTOHEX / INSTR to check for replacement char EFBFBD
+--          CONVERT(string, 'UTF8', charset) for encoding conversion
+--          VARRAY type for charset list
+--          RAISE VALUE_ERROR on failure
+-- PG     : convert_to / convert_from for encoding conversion
+--          Oracle charset names mapped to PG equivalents:
+--            AL32UTF8     -> UTF8
+--            WE8MSWIN1252 -> WIN1252
+--            WE8ISO8859P1 -> LATIN1
+--          BYTEA operations to check for replacement character EF BF BD
+-- Behaviour: unchanged — tries each charset in order, returns first
+--            successfully round-tripped string, raises exception if none work
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION anaplan_dev.reencode(p_string VARCHAR)
+RETURNS VARCHAR
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    -- Oracle: encoded VARCHAR2(32767);
+    --         type array_t IS varray(4) OF VARCHAR2(15);
+    --         array array_t := array_t('AL32UTF8','WE8MSWIN1252','WE8ISO8859P1');
+    v_encoded   VARCHAR;
+    v_encodings VARCHAR[] := ARRAY['UTF8', 'WIN1252', 'LATIN1'];
+    v_encoding  VARCHAR;
+    v_check     BYTEA;
+    -- E'\xEF\xBF\xBD' is the UTF-8 encoding of the Unicode replacement char U+FFFD
+    -- Oracle checked for hex sequence 'EFBFBD' in rawtohex(utl_raw.cast_to_raw(...))
+    v_replacement_char BYTEA := E'\\xEFBFBD';
+BEGIN
+    -- Oracle: FOR I IN 1..array.count LOOP
+    FOREACH v_encoding IN ARRAY v_encodings
+    LOOP
+        BEGIN
+            -- Oracle: encoded := CASE array(i)
+            --           WHEN 'AL32UTF8' THEN string
+            --           ELSE CONVERT(string, 'UTF8', array(i)) END;
+            IF v_encoding = 'UTF8' THEN
+                v_encoded := p_string;
+            ELSE
+                v_encoded := convert_from(
+                    convert_to(p_string, v_encoding),
+                    'UTF8'
+                );
+            END IF;
+
+            -- Oracle: IF instr(rawtohex(utl_raw.cast_to_raw(
+            --              utl_i18n.raw_to_char(utl_raw.cast_to_raw(encoded),'utf8')
+            --         )),'EFBFBD') = 0 THEN RETURN encoded; END IF;
+            -- PG    : convert to UTF8 bytes and check for replacement char
+            v_check := convert_to(v_encoded, 'UTF8');
+            IF position(v_replacement_char IN v_check) = 0 THEN
+                RETURN v_encoded;
+            END IF;
+
+        EXCEPTION WHEN OTHERS THEN
+            -- try next encoding
+            CONTINUE;
+        END;
+    END LOOP;
+
+    -- Oracle: RAISE VALUE_ERROR;
+    RAISE EXCEPTION 'reencode: no valid encoding found for input string'
+        USING ERRCODE = 'P0001';
+END;
+$$;
+
+COMMENT ON FUNCTION anaplan_dev.reencode(VARCHAR) IS
+    'Tries UTF8/WIN1252/LATIN1 encodings until one round-trips cleanly through UTF-8. Migrated from Oracle REENCODE - UTL_RAW/UTL_I18N replaced with convert_to/convert_from. Oracle charset names mapped: AL32UTF8->UTF8, WE8MSWIN1252->WIN1252, WE8ISO8859P1->LATIN1.';

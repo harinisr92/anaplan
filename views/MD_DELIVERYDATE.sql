@@ -1,0 +1,34 @@
+CREATE OR REPLACE VIEW ANAPLAN.MD_DELIVERYDATE AS
+WITH mvx_source AS (
+    SELECT
+        CDdivi AS division,
+        CDymd8 AS deliverydate,
+        CAST(
+            CASE WHEN CDdivi IN ('100','300') THEN CDDDAY ELSE CDBDAY END
+            AS VARCHAR(50)
+        ) AS deliverydatestatus
+    FROM MVXJDTA.CSYCAL
+    WHERE cdcono = 100
+      AND CDdivi <> ' '
+      AND CDdivi NOT IN ('400','800')
+      AND CDymd8 BETWEEN
+          CAST(TO_CHAR(CURRENT_DATE - INTERVAL '365 days','YYYYMMDD') AS NUMERIC)
+          AND CAST(TO_CHAR(CURRENT_DATE + INTERVAL '730 days','YYYYMMDD') AS NUMERIC)
+)
+SELECT division, deliverydate, deliverydatestatus
+FROM mvx_source
+
+UNION ALL
+
+SELECT DIVISION, DELIVERYDATE, DELIVERYDATESTATUS
+FROM LIDSKOE.MD_DELIVERYDATE
+WHERE DIVISION = '800'
+
+UNION ALL
+
+SELECT DIVISION, DELIVERYDATE, DELIVERYDATESTATUS
+FROM M3SKY.MD_DELIVERYDATE
+WHERE DIVISION = '400';
+
+COMMENT ON VIEW ANAPLAN.MD_DELIVERYDATE IS
+    'Delivery calendar dates per division. SYSDATE → CURRENT_DATE; smallint/varchar UNION type mismatch fixed with CAST.';

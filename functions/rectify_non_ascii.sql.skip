@@ -1,0 +1,44 @@
+-- =============================================================================
+-- FUNCTION: anaplan_dev.rectify_non_ascii()
+-- =============================================================================
+-- Migrated from: Oracle ANAPLAN.RECTIFY_NON_ASCII
+-- Oracle : PL/SQL loop iterating character by character using ASCII() +
+--          SELECT ASCII(SUBSTR(str,i,1)) FROM DUAL inside a loop
+-- PG     : Single regexp_replace call - same result, no per-character loop
+-- Behaviour: unchanged — strips all characters with ASCII < 32 or >= 127,
+--            trims leading/trailing ^ sentinel characters
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION anaplan_dev.rectify_non_ascii(input_str VARCHAR)
+RETURNS VARCHAR
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    -- Oracle: str VARCHAR2(2000); act number; cnt number; askey number;
+    --         OUTPUT_STR VARCHAR2(2000);
+    str        VARCHAR;
+    output_str VARCHAR;
+    -- Oracle variables act, cnt, askey, loop counter i not needed in PG
+BEGIN
+    -- Oracle: str := '^' || TO_CHAR(INPUT_STR) || '^';
+    str := '^' || input_str::TEXT || '^';
+
+    -- Oracle: cnt := length(str);
+    --         for i in 1 .. cnt loop
+    --           select ascii(substr(str,i,1)) into askey from dual;
+    --           if askey < 32 or askey >= 127 then
+    --             str := '^' || REPLACE(str, CHR(askey), '');
+    --           end if;
+    --         end loop;
+    -- PG    : Single regex replacing all non-printable/non-ASCII chars
+    str := regexp_replace(str, '[^\x20-\x7E]', '', 'g');
+
+    -- Oracle: OUTPUT_STR := trim(ltrim(rtrim(trim(str),'^'),'^'));
+    output_str := TRIM(BOTH '^' FROM str);
+
+    RETURN output_str;
+END;
+$$;
+
+COMMENT ON FUNCTION anaplan_dev.rectify_non_ascii(VARCHAR) IS
+    'Strips non-ASCII and control characters from a string. Migrated from Oracle RECTIFY_NON_ASCII - per-character PL/SQL loop with ASCII()+SELECT FROM DUAL replaced with a single regexp_replace. Same input/output behaviour.';
