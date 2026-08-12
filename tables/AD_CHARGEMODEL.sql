@@ -1,0 +1,22 @@
+DROP TABLE IF EXISTS ANAPLAN.AD_CHARGEMODEL;
+
+CREATE TABLE ANAPLAN.AD_CHARGEMODEL AS
+SELECT DISTINCT
+    cm.mechsy AS CHARGEMODEL,
+    CASE WHEN exc.chmodel IS NULL THEN 'NO' ELSE 'YES' END AS EXCISE,
+    CASE WHEN dep.chmodel IS NULL THEN 'NO' ELSE 'YES' END AS DEPOFEE
+FROM MVXJDTA.OLICHM cm
+LEFT JOIN (
+    SELECT DISTINCT o.mechsy AS chmodel
+    FROM MVXJDTA.OLICHM o
+    INNER JOIN ref.CHARGE_MODEL_EXCISE_IDS r
+        ON o.mecrid = r.MECRID
+) exc
+    ON cm.mechsy = exc.chmodel
+LEFT JOIN (
+    SELECT DISTINCT o.mechsy AS chmodel
+    FROM MVXJDTA.OLICHM o
+    INNER JOIN ref.CHARGE_MODEL_DEPOFEE_IDS r
+        ON o.mecrid = r.MECRID
+) dep
+    ON cm.mechsy = dep.chmodel;
